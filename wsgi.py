@@ -12,8 +12,9 @@ from datetime import datetime, timedelta
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='static', static_url_path='')
-# Configure CORS to allow requests from any origin for development
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# Configure CORS to allow requests from your specific frontend domain
+CORS(app, resources={r"/api/*": {"origins": "https://bbydsufg.manus.space"}}) 
+
 
 # Configure JWT
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-secret-key')
