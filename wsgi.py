@@ -12,9 +12,8 @@ from datetime import datetime, timedelta
 
 # Initialize Flask app
 app = Flask(__name__, static_folder='static', static_url_path='')
-# Configure CORS to allow requests from your specific frontend domain
-CORS(app, resources={r"/api/*": {"origins": "https://bbydsufg.manus.space"}}) 
-
+# Configure CORS to allow requests from our frontend domain
+CORS(app, resources={r"/api/*": {"origins": os.environ.get('CORS_ALLOWED_ORIGINS', 'https://bbydsufg.manus.space')}})
 
 # Configure JWT
 app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-secret-key')
@@ -152,10 +151,6 @@ def mock_convert_2d_to_3d(input_path, output_path):
 @app.route('/')
 def index():
     return jsonify({"message": "AutoCad_Buddy API is running"}), 200
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "healthy"}), 200
 
 # API routes
 @app.route('/api/register', methods=['POST'])
@@ -303,7 +298,187 @@ def convert_file():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Make sure the app listens on the port Render expects
+@app.route('/api/models', methods=['GET'])
+@jwt_required()
+def get_models():
+    email = get_jwt_identity()
+    user = USERS_DB.get(email)
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    models = []
+    for model_id in user['models']:
+        if model_id in MODELS_DB:
+            model = MODELS_DB[model_id]
+            models.append({
+                'id': model['id'],
+                'filename': model['filename'],
+                'created_at': model['created_at'],
+                'viewer_url': model['viewer_url'],
+                'download_url': model['download_url']
+            })
+    
+    return jsonify(models), 200
+
+@app.route('/api/viewer/<model_id>', methods=['GET'])
+def view_model(model_id):
+    if model_id not in MODELS_DB:
+        return jsonify({'error': 'Model not found'}), 404
+    
+    model = MODELS_DB[model_id]
+    
+    # Create viewer HTML if it doesn't exist
+    if not os.path.exists(model['viewer_path']):
+        with open(model['viewer_path'], 'w') as f:
+            f.write(f"""
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>3D Model Viewer - {model['filename']}</title>
+                <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+                <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
+                <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/loaders/STLLoader.js"></script>
+                <style>
+                    body {{ margin: 0; overflow: hidden; }}
+                    canvas {{ width: 100%; height: 100%; display: block; }}
+                    .info {{ position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; }}
+                </style>
+            </head>
+            <body>
+                <div class="info">
+                    <h3>{model['filename']}</h3>
+                    <p>Use mouse to rotate, scroll to zoom, and right-click to pan.</p>
+                </div>
+                <script>
+                    // Set up scene
+                    const scene = new THREE.Scene();
+                    scene.background = new THREE.Color(0xf0f0f0);
+                    
+                    // Set up camera
+                    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                    camera.position.z = 5;
+                    
+                    // Set up renderer
+                    const renderer = new THREE.WebGLRenderer({{ antialias: true }});
+                    renderer.setSize(window.innerWidth, window.innerHeight);
+                    document.body.appendChild(renderer.domElement);
+                    
+                    // Add lights
+                    const ambientLight = new THREE.AmbientLight(0x404040);
+                    scene.add(ambientLight);
+                    
+                    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.5);
+                    directionalLight1.position.set(1, 1, 1);
+                    scene.add(directionalLight1);
+                    
+                    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
+                    directionalLight2.position.set(-1, -1, -1);
+                    scene.add(directionalLight2);
+                    
+                    // Add controls
+                    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+                    controls.enableDamping = true;
+                    controls.dampingFactor = 0.25;
+                    
+                    // Load STL model
+                    const loader = new THREE.STLLoader();
+                    loader.load('/api/download/{model_id}', function(geometry) {{
+                        const material = new THREE.MeshPhongMaterial({{ color: 0x3498db, specular: 0x111111, shininess: 200 }});
+                        const mesh = new THREE.Mesh(geometry, material);
+                        
+                        // Center model
+                        geometry.computeBoundingBox();
+                        const center = geometry.boundingBox.getCenter(new THREE.Vector3());
+                        mesh.position.x = -center.x;
+                        mesh.position.y = -center.y;
+                        mesh.position.z = -center.z;
+                        
+                        scene.add(mesh);
+                        
+                        // Adjust camera to fit model
+                        const box = new THREE.Box3().setFromObject(mesh);
+                        const size = box.getSize(new THREE.Vector3());
+                        const maxDim = Math.max(size.x, size.y, size.z);
+                        camera.position.z = maxDim * 2.5;
+                    }});
+                    
+                    // Handle window resize
+                    window.addEventListener('resize', function() {{
+                        camera.aspect = window.innerWidth / window.innerHeight;
+                        camera.updateProjectionMatrix();
+                        renderer.setSize(window.innerWidth, window.innerHeight);
+                    }});
+                    
+                    // Animation loop
+                    function animate() {{
+                        requestAnimationFrame(animate);
+                        controls.update();
+                        renderer.render(scene, camera);
+                    }}
+                    
+                    animate();
+                </script>
+            </body>
+            </html>
+            """)
+    
+    return send_file(model['viewer_path'])
+
+@app.route('/api/download/<model_id>', methods=['GET'])
+def download_model(model_id):
+    if model_id not in MODELS_DB:
+        return jsonify({'error': 'Model not found'}), 404
+    
+    model = MODELS_DB[model_id]
+    
+    return send_file(model['model_path'], as_attachment=True, download_name=f"{model['filename']}.stl")
+
+@app.route('/api/equipment/categories', methods=['GET'])
+def get_equipment_categories():
+    return jsonify(list(EQUIPMENT_DB.keys())), 200
+
+@app.route('/api/equipment/types', methods=['GET'])
+def get_equipment_types():
+    category = request.args.get('category', 'kitchen')
+    
+    if category not in EQUIPMENT_DB:
+        return jsonify({'error': 'Category not found'}), 404
+    
+    return jsonify(EQUIPMENT_DB[category]['types']), 200
+
+@app.route('/api/equipment/search', methods=['GET'])
+def search_equipment():
+    category = request.args.get('category', 'kitchen')
+    type_filter = request.args.get('type', '')
+    region = request.args.get('region', 'US')
+    
+    if category not in EQUIPMENT_DB:
+        return jsonify({'error': 'Category not found'}), 404
+    
+    results = []
+    for item in EQUIPMENT_DB[category]['items']:
+        if (not type_filter or item['type'] == type_filter) and region in item['regions']:
+            results.append(item)
+    
+    return jsonify(results), 200
+
+@app.route('/api/location', methods=['GET'])
+def get_user_location():
+    # In a real app, this would use geolocation or IP-based location
+    return jsonify({
+        'country': 'US',
+        'region': 'West',
+        'city': 'San Francisco'
+    }), 200
+
+# Health check endpoint for Render
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
